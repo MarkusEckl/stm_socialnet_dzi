@@ -1,0 +1,498 @@
+---
+title: "Structural Topic Modeling mit Rezensionen aus Socialnet und Artiekl der Soziailen Arbeit aus der DZI Literaturdatenbank"
+output:
+  html_notebook:
+    code_folding: hide
+    theme: readable
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+  html_document:
+    df_print: paged
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(plyr)
+library(magrittr)
+library(dplyr)
+library(quanteda)
+library(spacyr)
+library(stm)
+library(DT)
+library(sna)
+library(ggplot2)
+library(ggrepel)
+setwd("/home/eckl/analyse_socialnet_dzi_stm/")
+
+```
+
+##DZI Datensatz Bereinigung & Vorbereitung 
+```{r}
+dzi <- read.csv("data/dzi_zsa_finall.csv", sep = ",", encoding = "utf-8")
+
+dzi[["Puplikation_art"]] <- c(rep("Artikel", nrow(dzi)))
+#cleaning the year strings form dzi 
+dzi$Jahr <- gsub("1998/1999", "1999", dzi$Jahr)
+dzi$Jahr <- gsub("20003", "2003", dzi$Jahr)
+dzi$Jahr <- gsub("20009", "2003", dzi$Jahr)
+dzi$Jahr <- gsub("2ß14", "2014", dzi$Jahr)
+summary(dzi$Jahr)
+
+```
+
+
+
+##scoialnet Datensatz Bereinigung und Vorbereitung 
+```{r}
+
+socnet <- read.csv("data/socialnet_df_finale2.csv", sep = "\t", encoding = "utf-8")
+#cleaning year strings from socialnet
+socnet$Erscheinungsjahr <- gsub("2012.0", "2012", socnet$Erscheinungsjahr)
+socnet$Erscheinungsjahr <- gsub("2013.0", "2013", socnet$Erscheinungsjahr)
+socnet$Erscheinungsjahr <- gsub("2014.0", "2014", socnet$Erscheinungsjahr)
+socnet$Erscheinungsjahr <- gsub("2015.0", "2015", socnet$Erscheinungsjahr)
+socnet$Erscheinungsjahr <- gsub("2016.0", "2016", socnet$Erscheinungsjahr)
+socnet$Erscheinungsjahr <- gsub("2017.0", "2017", socnet$Erscheinungsjahr)
+socnet$Erscheinungsjahr <- gsub("2018.0", "2018", socnet$Erscheinungsjahr)
+socnet$Erscheinungsjahr <- gsub("978-3-8379-2513-5", NA,socnet$Erscheinungsjahr)
+
+#delate empty rows 
+socnet2 <- socnet %>% drop_na(Erscheinungsjahr)
+socnet2 <- subset(socnet2, Erscheinungsjahr != "")
+socnet2 <- subset(socnet2, Erscheinungsjahr != " ")
+socnet2$Inahlt_bereinigt <- as.character(socnet2$Inhalt_bereinigt)
+
+
+socnet3 <- select(socnet2, "Erscheinungsjahr", "Inhalt_bereinigt", "Titel","RezNachname")
+
+socnet3[["Puplikation_art"]] <- c(rep("Rezension", nrow(socnet3)))
+```
+
+
+##Zusammenführung der beiden Datensätze
+```{r}
+
+socnet3 <- rename(socnet3, c("Erscheinungsjahr"="Jahr", "Inhalt_bereinigt"="Text", "RezNachname"="Autor"))
+dzi <- rename(dzi, c("Autor_1"="Autor", "Abstract"="Text"))
+
+df <- merge(socnet3, dzi, all=TRUE)
+df$Puplikation_art <- as.factor(df$Puplikation_art)
+
+df$Text <- as.character(df$Text)
+#df$Jahr <- as.factor(df$Jahr)
+
+#save final data
+write.csv(df, file = "data/df_dzi_socialnet.csv")
+
+```
+
+
+#Anzahl und Verteilung der Artikel und Rezensionen 
+```{r}
+setwd("/home/eckl/analyse_socialnet_dzi_stm/")
+df0 <- read.csv("data/df_dzi_socialnet.csv", encoding = "utf-8", sep=",")
+
+# Bar charts are automatically stacked when multiple bars are placed at the same location. 
+#The order of the fill is designed to match year.
+png("Verteilung_Artikelabstracts_Rezensionen_Jahre.png", width=900, height=600, res=150)
+g <- ggplot(df0, aes(Jahr))
+g + geom_bar(aes(fill=Puplikation_art), width = 0.5)  + 
+  theme(axis.text.x = element_text(angle=65, vjust=0.6)) + 
+  #scale_y_continuous(labels = comma) +
+  labs(title="Verteilung der Artikelabstracts und Rezensionen über die Jahre") 
+
+dev.off()
+
+#determination of the period of underspend 
+df <- subset(df0, df0$Jahr >= 2000 & df0$Jahr < 2018)
+
+df$Text <- as.character(df$Text)
+```
+## Textbereinigung  
+
+### POS-Tagging & Lemmatising 
+```{r message=FALSE, warning=FALSE, results = 'hide', eval = FALSE}
+
+# Start the clock!
+ptm <- proc.time()
+#Initialize spaCy to call from R.
+spacy_initialize(model = 'de' ,refresh_settings = TRUE)
+#tokenize and tag the texts, and returns a data.table of the results
+parsed <- spacy_parse(df$Text)
+#terminates the python process in the backround
+spacy_finalize()
+save.image('output/socialnet_dzi_text_paresed.RData')
+#Stop the clock!
+proc.time() - ptm
+
+```
+
+```{r message=FALSE, warning=FALSE, results = 'hide', eval = FALSE}
+load('output/socialnet_dzi_text_paresed.RData')
+
+#create tokens and use lammatastion of the words
+#remove puncation, numbers, stopwords and special topkens
+#min. character are 4
+tokens <- as.tokens(parsed, use_lemma = TRUE) %>% 
+  tokens(remove_punct = TRUE, remove_numbers = TRUE) %>% 
+  tokens_tolower() %>% 
+  tokens_remove(c(stopwords('de'), "vgl", "et_a1", "fiir","v0n", "a1s", "hinsichtlich", 
+                  "11nd", "z._b.", "cine", "hierzu", "erstens", "zweitens", "deutlich", "tion",
+                   "geben", "mehr", "immer", "schon", "gehen", "sowie", "erst", "mehr", "etwa",
+                  "dabei", "dis-", "beziehungsweise", "seit", "drei", "insbesondere",
+                  stopwords("en")),
+                min_nchar = 4L,  padding = TRUE)
+
+#quanteda- Identify and score multi-word expressions, or adjacent fixed-length collocations, from text
+#min count 30 
+collocation <- textstat_collocations(tokens, min_count = 30)
+#quanteda - cearce Bi-grams 
+tokens <- tokens_compound(tokens, collocation, join = FALSE)
+
+#quanteda - Get or set variables associated with a document in a corpus, tokens or dfm object.
+docvars(tokens) <- df %>% select(Text, Jahr, Puplikation_art) 
+
+
+dfm_sp <- tokens %>% dfm() %>% dfm_select(min_nchar = 4L) %>% 
+  dfm_trim(min_docfreq = 50) %>%  # minimum 50 documents (removes rare terms)
+   dfm_trim(max_docfreq = 0.25,
+            docfreq_type = 'prop') # maximum in 25 percent of documents (stop words)
+
+sp_grouped <- dfm_group(dfm_sp, groups = 'Jahr') # grouped dfm for keyness
+
+str(dfm_sp)
+
+
+
+save.image('output/data_cleaning_dzi_socialnet.RData')
+
+
+```
+
+
+
+#Topic Modeling Evaluation - Number of Topics 
+
+```{r}
+
+
+
+load('output/data_cleaning_dzi_socialnet.RData') # loads  clean data 
+
+
+dfm2stm <- convert(dfm_sp, to = "stm")
+
+#calculate different stm models with k topics
+kResult <- searchK(dfm2stm$documents, dfm2stm$vocab, K=c(20,40,60,80,100,120,140,160), data=dfm2stm$meta)
+
+kResult2 <- searchK(dfm2stm$documents, dfm2stm$vocab, K=c(180,200,220), data=dfm2stm$meta)
+
+#oveview differnt metrics 
+plot.searchK(kResult2)
+plot.searchK(kResult)
+
+
+# stm data into dataframe for ggplot2 & ggrepel (This package contains extra geoms for ggplot2)
+#library(ggrepel)
+semantic_coherence <- kResult$results$semcoh
+exclusivity <- kResult$results$exclus
+topic_model <- kResult$results$K
+n_topics <- c("20 Topics", "40 Topics", "60 Topics", "80 Topics","100 Topics","120 Topics", "140 Topics", "160 Topics")
+evaluation_var <-data.frame(exclusivity,semantic_coherence, topic_model, n_topics)
+evaluation_var
+
+semantic_coherence <- kResult2$results$semcoh
+exclusivity <- kResult2$results$exclus
+topic_model <- kResult2$results$K
+n_topics <- c("180 Topics", "200 Topics", "220 Topics")
+evaluation_var2 <-data.frame(exclusivity,semantic_coherence, topic_model, n_topics)
+evaluation_var2
+
+evaluation_var_20_220 <- rbind(evaluation_var, evaluation_var2)
+evaluation_var_20_220
+write.csv(evaluation_var, file = "data/evaluation_var_20_220.csv")
+
+#code kann verkürzt werden, wenn gleich eine einzige kResults berechent wird - hätte aber zu lange gedauert!
+
+#Plot & save as png
+png("evaluation_sementic_coherence_exclusivity.png", width=900, height=600, res=150)
+px <- ggplot(evaluation_var_20_220, aes(semantic_coherence, exclusivity)) +
+  geom_point(color = 'red')+ 
+  geom_label_repel(aes(label = n_topics, 
+                       fill = factor(n_topics)), color = 'white',
+                   size = 2.5) +
+  theme(legend.position = "bottom") +
+  labs(title="Semantic coherence und exclusivity der berechneten Modelle", x = "semantic coherence", 
+       y = " exclusivity") + labs(fill = "Modelle mit ")
+  theme_update(plot.title = element_text(hjust = 0.5))
+px
+dev.off()
+px
+save.image('output/stm_evaluation.RData')
+
+
+```
+
+#Modell mit 140 Topics
+
+```{r  warning=FALSE, paged.print=FALSE, results='hide'}
+# determination of the count of topics
+#one of the best results form the evationation.
+topic.count <- 140
+
+#init.type - Spectral: The default choice, "Spectral", provides a deterministic inialization using the spectral algorithm given in Arora et al 2014. The fastes alorithm 
+model.stm <- stm(dfm2stm$documents, 
+                 dfm2stm$vocab, 
+                 K = topic.count, 
+                 data = dfm2stm$meta, 
+                 init.type = "Spectral") 
+
+
+save.image('output/stm_model_dzi_socialnet.RData')
+
+```
+
+
+
+```{r}
+
+load('output/stm_model_dzi_socialnet.RData') # loads  stm model
+
+
+library(markdown)
+df.topics <- data.frame(t(labelTopics(model.stm, n = 20)$score))
+p <- df.topics %>% 
+    head(100) %>% DT::datatable(options = list(lengthMenu = c(10, 10, 20)))
+print(p)
+
+```
+
+#Topics und die top 10 gewichteten Wörter
+```{r fig.height=15, fig.width=40}
+
+labelTopics(model.stm, n=10)
+
+```
+
+
+
+# Top Topics - Topicverteilung über den gesamten Korpus   
+
+```{r fig.height=25, fig.width=15}
+png("Topicverteilung_gesamten_Korpus.png", width=900, height=600, res=150)
+par(bty="n",col="grey40",lwd=3)
+plot.STM(model.stm,type="summary",xlim=(c(0,0.05)), ylim = (c(0,140)), n =7)
+dev.off()
+```
+
+
+#Topic Label
+```{r fig.height=12, fig.width=15}
+
+getwd()
+df.topic_lab <- read.csv("/home/eckl/analyse_socialnet_dzi_stm/data/df.topic.lab.csv")
+df.topic.lab %>% head()
+model.stm.labels$labname <- topic.name
+
+
+
+```
+
+
+# Wordclouds 
+Als nächstes wurden Wordclouds für die jeweiligen Topics erstellt. Daber wurden die 20 Wörter eines Topics herangezogen, welche die höchste Wahrscheinlichkeit haben, das Topic zu repräsentieren. 
+```{r fig.height=12, fig.width=15}
+library(RColorBrewer)
+library(wordcloud)
+
+#topic.count <- 140
+par(mfrow=c(3,3))
+for (i in seq_along(sample(1:topic.count, size = topic.count)))
+{
+  cloud(model.stm, topic = i, scale = c(4,.40), 
+        max.words = 20, main = paste0("Topic ", model.stm.labels$topicnums[i],  collapse = ", "))
+}
+```
+
+## Topic Vergleich
+```{r fig.height=8, fig.width=10}
+
+ c(2,4,7,15,11,10)
+plot(model.stm, type = "perspectives", topics = c(2,4), n = 30)
+plot(model.stm, type = "perspectives", topics = c(7,15), n = 30)
+plot(model.stm, type = "perspectives", topics = c(11,10), n = 30)
+
+```
+
+
+
+
+```{r fig.height=12, fig.width=15}
+
+
+#topic.count =80
+
+
+model.stm.labels <- labelTopics(model.stm, 1:topic.count)
+dfm2stm$meta$datum <- as.numeric(dfm2stm$meta$Jahr)
+model.stm.ee <- estimateEffect(1:topic.count ~  s(Jahr), model.stm, meta = dfm2stm$meta)
+
+
+par(mfrow=c(3,3))
+for (i in seq_along(sample(1:topic.count, size = topic.count)))
+{
+  plot(model.stm.ee, "Jahr", 
+       method = "continuous", 
+       topics = i, 
+       main = paste0("Topic ", model.stm.labels$topicnums[i], ": ", model.stm.labels$labname[i]), 
+       printlegend = F, 
+       xlim = c(2000, 2017), 
+       ylim= c(0.001,0.03))
+}
+
+```
+
+
+
+
+```{r}
+
+
+topic.interaction <- stm(dfm2stm$documents, 
+                 dfm2stm$vocab, 
+                 K = topic.count, 
+                 prevalence =  ~ Puplikation_art * s(Jahr),
+                 data = dfm2stm$meta, 
+                 init.type = "Spectral") 
+
+save.image('topic_interaction_stm_model_dzi_socialnet.RData')
+```
+
+
+
+```{r}
+
+load('/home/eckl/analyse_socialnet_dzi_stm/output/topic_interaction_stm_model_dzi_socialnet.RData')
+library(stminsights)
+
+#combine estimates for interaction effects
+prep_int <- estimateEffect(c(1:topic.count) ~ Puplikation_art * s(Jahr), topic.interaction, metadata = dfm2stm$meta)
+
+#summary(prep_int)
+
+
+#very important -get_effects acapt as moderator only numeric (no character or fector)
+prep_int$data$Puplikation_art <- as.numeric(prep_int$data$Puplikation_art)
+
+#get_effects form Charsten Schwemmers package stminsights 
+effects_int <- get_effects(estimates = prep_int,
+                          variable = 'Jahr',
+                          type = 'continuous',
+                          moderator = 'Puplikation_art',
+                          modval = 1) %>%
+ bind_rows(
+   get_effects(estimates = prep_int,
+               variable = 'Jahr',
+               type = 'continuous',
+               moderator = 'Puplikation_art',
+               modval = 0)
+ )
+```
+
+
+
+#Diffusion der Topics in Abhägigkeit der Publikationsart
+##allg -> bedeutet, dass das Topic sehr allgemein ist und ein klares Label nicht möglich ist
+```{r}
+topic.interaction.labels <- labelTopics(topic.interaction, 1:topic.count)
+topic.interaction.labels$labname <- topic.name
+
+effects_int <- data.frame(effects_int)
+
+Publikationsart <- gsub("0","Artikel",gsub("1","Rezension",effects_int$moderator))
+effects_int$Publikationsart <- Publikationsart
+
+
+for (i in seq_along(sample(1:topic.count, size = topic.count)))
+{
+# plot interaction effects
+  plot_ie <- effects_int %>% filter(topic == i) %>%
+    mutate(moderator = as.factor(Publikationsart)) %>%
+    ggplot(aes(x = value, y = proportion, color = Publikationsart,
+    group = Publikationsart, fill = Publikationsart)) +
+    geom_line() +
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2)  +
+    theme_light() + labs(x = 'Jahr', y = 'Topic Proportion',
+                         color = 'Publikationsart', group = 'Publikationsart', fill = 'Publikationsart') +
+    ggtitle(label = paste0("Diffusion der Topics in Abhägigkeit der Publikationsart"),
+            subtitle = paste0("Topic ", topic.interaction.labels$topicnums[i], ": ",
+                              topic.interaction.labels$labname[i])) +
+    theme(plot.title = element_text(hjust = 0.5), plot.subtitle = element_text(hjust = 0.5))
+
+  print(plot_ie)
+  }
+
+
+```
+
+
+
+#Korrelationsnetzwerke der Topics 
+
+```{r fig.height=20, fig.width=20}
+library(stminsights)
+library(shiny)
+library(shinydashboard)
+library(ggraph)
+stm_corrs <- get_network(model = model.stm,
+                         method = 'simple',
+                         labels = paste(topic.interaction.labels$labname),
+                         cutoff = 0.15,
+                         cutiso = TRUE)
+
+graph <-ggraph(stm_corrs, layout = 'fr') +
+  geom_edge_link(
+    aes(edge_width = weight),
+    label_colour = '#fc8d62',
+    edge_colour = '#377eb8') +
+  geom_node_point(size = 4, colour = 'black')  +
+  geom_node_label(
+    aes(label = name, size = props),
+    colour = 'black',  repel = TRUE, alpha = 0.65) +
+  scale_size(range = c(5, 13), labels = scales::percent) +
+  labs(size = 'Topic Proportion',  edge_width = 'Topic Correlation') +
+  scale_edge_width(range = c(2, 9)) +
+  theme_graph()
+
+graph
+
+stm_corrs %>% head()
+```
+
+
+
+
+#Korrelationsnetzwerk der Topics & Clustering nach Modularity 
+```{r fig.height=20, fig.width=20}
+library(igraph)
+
+clp <- cluster_label_prop(stm_corrs)
+clp
+png("Korrelationsnetzwerk_Topic_Modularity.png", width=900, height=600, res=150)
+plot_clp <- plot(clp, stm_corrs)
+
+#functions to plot your graph
+dev.off()
+
+
+
+
+```
+
+
